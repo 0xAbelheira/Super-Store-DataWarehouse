@@ -77,6 +77,8 @@ CREATE TABLE Location (
     location_code VARCHAR(50),
     country_id INT,
     country_name VARCHAR(50),
+    region_id INT,
+    region_name VARCHAR(50),
     state_id INT,
     state_name VARCHAR(50),
     city_id INT,
@@ -92,7 +94,7 @@ CREATE TABLE Category (
 CREATE TABLE Product (
     product_id INT AUTO_INCREMENT PRIMARY KEY,
     product_code VARCHAR(50),
-    product_name VARCHAR(100),
+    product_name VARCHAR(150),
     category_id INT,
     category_name VARCHAR(50),
     sub_category_id INT,
