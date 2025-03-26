@@ -1,12 +1,9 @@
 #!/bin/bash
 
-# MySQL credentials
-MYSQL_USER="root"
-MYSQL_PASSWORD="root"
-DATABASE_SCRIPT="setup_database.sql"
-DATABASE_NAME="superstore_dw"
+# Load environment variables from .env file
+export $(grep -v '^#' .env | xargs)
 
 # Run the SQL script
-mysql -u "$MYSQL_USER" -p"$MYSQL_PASSWORD" < "$DATABASE_SCRIPT"
+mysql -u "$DB_USER" -p"$DB_PASSWORD" < "$DATABASE_SCRIPT"
 
 echo "✅ Database and tables created successfully!"

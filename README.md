@@ -2,7 +2,9 @@
 
 ## **Setup Database**
 
-**1.** For MacOS, use the following command to start the MySQL server.
+**1.** Create a `.env` file in the root directory of the project using the `.env_template` file as a template and change the values to match your MySQL server configuration.
+
+**2.** For MacOS, use the following command to start the MySQL server.
 
     ```bash
     brew services start mysql
