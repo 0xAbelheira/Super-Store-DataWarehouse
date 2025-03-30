@@ -352,6 +352,23 @@ def load_geography_dimensions(connection, df, level_mappings):
     logger.info(f"Loaded {len(location_df)} records into Location dimension")
 
 
+# Function to load Shipping dimension table
+def load_shipping_dimension(connection, df):
+    # Extract unique shipping modes
+    shipping_df = df["Ship Mode"].drop_duplicates().reset_index(drop=True)
+
+    cursor = connection.cursor()
+    for shipping_mode in shipping_df:
+        query = """
+        INSERT INTO Shipping (ship_mode) 
+        VALUES (%s)
+        """
+        cursor.execute(query, (shipping_mode,))
+
+    connection.commit()
+    logger.info(f"Loaded {len(shipping_df)} records into Shipping dimension")
+
+
 # Function to load Category and Product dimension tables
 def load_product_dimensions(connection, df, level_mappings):
     # Extract unique categories
@@ -416,6 +433,7 @@ def load_dimension_tables(connection, df):
             load_calendar_dimension(connection, df)
             load_customer_dimension(connection, df)
             load_geography_dimensions(connection, df, level_mappings)
+            load_shipping_dimension(connection, df)
             load_product_dimensions(connection, df, level_mappings)
 
             logger.info("All dimension tables loaded successfully!")
@@ -534,16 +552,159 @@ def load_item_fact_table(connection, df):
     return item_count
 
 
+# Function to load Orders fact table
+def load_orders_fact_table(connection, df):
+    cursor = connection.cursor()
+
+    logger.info("Starting ETL process for Orders fact table...")
+
+    # Step 1: Retrieve all necessary dimension keys from the database
+    # Get customer mappings
+    cursor.execute("SELECT customer_id, customer_code FROM Customer")
+    customer_mapping = {row[1]: row[0] for row in cursor.fetchall()}
+
+    # Get calendar mappings for order and shipping dates
+    cursor.execute("SELECT calendar_id, full_date FROM Calendar")
+    calendar_mapping = {
+        row[1].strftime("%Y-%m-%d"): row[0] for row in cursor.fetchall()
+    }
+
+    # Get location mappings
+    cursor.execute("SELECT location_id, postal_code, city_name FROM Location")
+    location_mapping = {(row[1], row[2]): row[0] for row in cursor.fetchall()}
+
+    # Get shipping mappings
+    cursor.execute("SELECT shipping_id, ship_mode FROM Shipping")
+    shipping_mapping = {row[1]: row[0] for row in cursor.fetchall()}
+
+    # Step 2: Group data by order to calculate order-level measures
+    # We need to aggregate by order ID
+    order_groups = df.groupby("Order ID")
+
+    order_count = 0
+    skipped_count = 0
+
+    for order_id, order_data in order_groups:
+        try:
+            # Take the first row for order-level data (dates, customer, location, shipping)
+            first_row = order_data.iloc[0]
+
+            # Format dates for lookup
+            order_date = pd.to_datetime(first_row["Order Date"]).strftime("%Y-%m-%d")
+            ship_date = pd.to_datetime(first_row["Ship Date"]).strftime("%Y-%m-%d")
+
+            # Look up dimension keys
+            customer_id = customer_mapping.get(first_row["Customer ID"])
+            order_calendar_id = calendar_mapping.get(order_date)
+            shipping_calendar_id = calendar_mapping.get(ship_date)
+            location_key = (str(first_row["Postal Code"]), first_row["City"])
+            location_id = location_mapping.get(location_key)
+            shipping_id = shipping_mapping.get(first_row["Ship Mode"])
+
+            # Skip if any dimension key is missing
+            if not all(
+                [
+                    customer_id,
+                    order_calendar_id,
+                    shipping_calendar_id,
+                    location_id,
+                    shipping_id,
+                ]
+            ):
+                skipped_count += 1
+                if skipped_count <= 5:  # Limit the number of error messages
+                    logger.warning(
+                        f"Skipping order due to missing keys - Order ID: {order_id}"
+                    )
+                continue
+
+            # Calculate fact measures based on the requirements
+            # Aggregate values across all items in the order
+            quantity_order = int(order_data["Quantity"].sum())  # Convert to Python int
+            sales_order = float(order_data["Sales"].sum())      # Convert to Python float
+            profit_order = float(order_data["Profit"].sum())    # Convert to Python float
+
+            # Calculate lost_value_order (full price - discounted price for the entire order)
+            # We need to calculate this for each item and then sum
+            lost_value_order = 0.0  # Use native Python float
+            for _, item in order_data.iterrows():
+                discount = float(item["Discount"])
+                item_sales = float(item["Sales"])
+
+                if discount < 1:
+                    full_price = item_sales / (1 - discount)
+                    lost_value_order += (full_price - item_sales)
+
+            # Convert the final lost_value to ensure it's a native Python float
+            lost_value_order = float(lost_value_order)
+
+            # Insert into Orders fact table
+            query = """
+            INSERT INTO Orders (order_calendar_id, shipping_calendar_id, customer_id, location_id, 
+                            shipping_id, order_code, sales_order, quantity_order, 
+                            lost_value_order, profit_order)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+
+            cursor.execute(
+                query,
+                (
+                    order_calendar_id,
+                    shipping_calendar_id,
+                    customer_id,
+                    location_id,
+                    shipping_id,
+                    order_id,
+                    sales_order,
+                    quantity_order,
+                    lost_value_order,
+                    profit_order,
+                ),
+            )
+
+            order_count += 1
+
+            # Commit in batches to improve performance
+            if order_count % 200 == 0:
+                connection.commit()
+                logger.info(f"Processed {order_count} orders...")
+
+        except Exception as e:
+            logger.error(f"Error processing order: {e}")
+            logger.error(f"Order data: {order_id}")
+
+    # Final commit
+    connection.commit()
+    logger.info(f"Loaded {order_count} records into Orders fact table")
+    logger.info(f"Skipped {skipped_count} orders due to missing dimension keys")
+
+    return order_count
+
+
 def load_fact_tables(connection, df):
-    # Execute the loading function
+    # Execute the loading functions
     try:
         # Make sure we're connected
         if connection.is_connected():
+            # Load shipping dimension first - needed for Orders fact table
+            load_shipping_dimension(connection, df)
+
+            # Load Item fact table
             logger.info("Loading Item fact table...")
             item_count = load_item_fact_table(connection, df)
             logger.info(
                 f"Item fact table loading complete - {item_count} records inserted"
             )
+
+            # Load Orders fact table
+            logger.info("Loading Orders fact table...")
+            order_count = load_orders_fact_table(connection, df)
+            logger.info(
+                f"Orders fact table loading complete - {order_count} records inserted"
+            )
+            
+            
+
     except Error as e:
         logger.error(f"Error loading fact tables: {e}")
 
