@@ -142,7 +142,7 @@ CREATE TABLE Orders (
     CONSTRAINT fk_orders_customer FOREIGN KEY (customer_id) REFERENCES Customer(customer_id),
     CONSTRAINT fk_orders_location FOREIGN KEY (location_id) REFERENCES Location(location_id),
     CONSTRAINT fk_orders_shipping FOREIGN KEY (shipping_id) REFERENCES Shipping(shipping_id),
-    PRIMARY KEY (order_calendar_id, shipping_calendar_id, location_id, shipping_id)
+    PRIMARY KEY (order_calendar_id, shipping_calendar_id, location_id, shipping_id, order_code)
 );
 
 CREATE TABLE OrderM (

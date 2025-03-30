@@ -356,6 +356,8 @@ def load_geography_dimensions(connection, df, level_mappings):
 def load_shipping_dimension(connection, df):
     # Extract unique shipping modes
     shipping_df = df["Ship Mode"].drop_duplicates().reset_index(drop=True)
+    
+    logger.info(f"Unique shipping modes: {shipping_df.tolist()}")
 
     cursor = connection.cursor()
     for shipping_mode in shipping_df:
@@ -681,14 +683,141 @@ def load_orders_fact_table(connection, df):
     return order_count
 
 
+# Function to load OrderM fact table
+def load_order_m_fact_table(connection, df):
+    cursor = connection.cursor()
+
+    logger.info("Starting ETL process for OrderM fact table...")
+
+    # Step 1: Retrieve dimension keys from the database
+    # Get CalendarMonth mappings
+    cursor.execute(
+        """
+        SELECT cm.calendar_month_id, cm.year_number, cm.calendar_month_number 
+        FROM CalendarMonth cm
+    """
+    )
+    calendar_month_mapping = {(row[1], row[2]): row[0] for row in cursor.fetchall()}
+    logger.info(f"Loaded {len(calendar_month_mapping)} calendar month mappings")
+
+    # Get State mappings
+    cursor.execute("SELECT state_id, state_name FROM State")
+    state_mapping = {row[1]: row[0] for row in cursor.fetchall()}
+    logger.info(f"Loaded {len(state_mapping)} state mappings")
+
+    # Step 2: Create month and year columns for grouping
+    df["year"] = pd.to_datetime(df["Order Date"]).dt.year
+    df["month"] = pd.to_datetime(df["Order Date"]).dt.month
+
+    # Step 3: Group data by year, month, and state to calculate aggregates
+    grouped_data = (
+        df.groupby(["year", "month", "State"])
+        .agg({"Sales": "sum", "Quantity": "sum", "Profit": "sum"})
+        .reset_index()
+    )
+
+    # Step 4: Calculate lost_value_month from original data
+    monthly_lost_value = {}
+
+    for _, row in df.iterrows():
+        # Extract date components
+        date = pd.to_datetime(row["Order Date"])
+        year = date.year
+        month = date.month
+        state = row["State"]
+
+        # Calculate lost value for this item
+        discount = float(row["Discount"])
+        sales = float(row["Sales"])
+
+        if discount < 1:
+            full_price = sales / (1 - discount)
+            lost_value = full_price - sales
+        else:
+            lost_value = 0
+
+        # Aggregate by (year, month, state)
+        key = (year, month, state)
+        if key not in monthly_lost_value:
+            monthly_lost_value[key] = 0
+        monthly_lost_value[key] += lost_value
+
+    # Step 5: Insert data into OrderM table
+    inserted_count = 0
+    skipped_count = 0
+
+    for _, row in grouped_data.iterrows():
+        try:
+            year = row["year"]
+            month = row["month"]
+            state_name = row["State"]
+
+            # Get dimension keys
+            calendar_month_id = calendar_month_mapping.get((year, month))
+            state_id = state_mapping.get(state_name)
+
+            if not all([calendar_month_id, state_id]):
+                skipped_count += 1
+                if skipped_count <= 5:
+                    logger.warning(
+                        f"Skipping OrderM record due to missing keys - Year: {year}, Month: {month}, State: {state_name}"
+                    )
+                continue
+
+            # Get the measures
+            sales_month = float(row["Sales"])
+            quantity_month = float(row["Quantity"])  # Using float as per table schema
+            profit_month = float(row["Profit"])
+
+            # Get lost value from the dictionary we calculated earlier
+            key = (year, month, state_name)
+            lost_value_month = float(monthly_lost_value.get(key, 0))
+
+            # Insert into OrderM table
+            query = """
+            INSERT INTO OrderM (calendar_month_id, state_id, sales_month, quantity_month, 
+                              lost_value_month, profit_month)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """
+
+            cursor.execute(
+                query,
+                (
+                    calendar_month_id,
+                    state_id,
+                    sales_month,
+                    quantity_month,
+                    lost_value_month,
+                    profit_month,
+                ),
+            )
+
+            inserted_count += 1
+
+            # Commit in batches
+            if inserted_count % 50 == 0:
+                connection.commit()
+                logger.info(f"Processed {inserted_count} monthly aggregations...")
+
+        except Exception as e:
+            logger.error(f"Error processing OrderM record: {e}")
+            logger.error(
+                f"Record data: Year: {year}, Month: {month}, State: {state_name}"
+            )
+
+    # Final commit
+    connection.commit()
+    logger.info(f"Loaded {inserted_count} records into OrderM fact table")
+    logger.info(f"Skipped {skipped_count} records due to missing dimension keys")
+
+    return inserted_count
+
+
 def load_fact_tables(connection, df):
     # Execute the loading functions
     try:
         # Make sure we're connected
         if connection.is_connected():
-            # Load shipping dimension first - needed for Orders fact table
-            load_shipping_dimension(connection, df)
-
             # Load Item fact table
             logger.info("Loading Item fact table...")
             item_count = load_item_fact_table(connection, df)
@@ -702,8 +831,13 @@ def load_fact_tables(connection, df):
             logger.info(
                 f"Orders fact table loading complete - {order_count} records inserted"
             )
-            
-            
+
+            # Load OrderM fact table
+            logger.info("Loading OrderM fact table...")
+            order_m_count = load_order_m_fact_table(connection, df)
+            logger.info(
+                f"OrderM fact table loading complete - {order_m_count} records inserted"
+            )
 
     except Error as e:
         logger.error(f"Error loading fact tables: {e}")
