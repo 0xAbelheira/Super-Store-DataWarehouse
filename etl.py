@@ -665,7 +665,7 @@ def load_orders_fact_table(connection, df):
             order_count += 1
 
             # Commit in batches to improve performance
-            if order_count % 200 == 0:
+            if order_count % 500 == 0:
                 connection.commit()
                 logger.info(f"Processed {order_count} orders...")
 
@@ -926,6 +926,210 @@ def load_product_performance_fact_table(connection, df):
 
     return inserted_count
 
+# Function to load ShippingBehavior fact table
+def load_shipping_behavior_fact_table(connection, df):
+    cursor = connection.cursor()
+
+    logger.info("Starting ETL process for ShippingBehavior fact table...")
+
+    # Step 1: Retrieve dimension keys from the database
+    # Get Shipping mappings
+    cursor.execute("SELECT shipping_id, ship_mode FROM Shipping")
+    shipping_mapping = {row[1]: row[0] for row in cursor.fetchall()}
+    logger.info(f"Loaded {len(shipping_mapping)} shipping mappings")
+
+    # Get Category mappings
+    cursor.execute("SELECT category_id, category_name FROM Category")
+    category_mapping = {row[1]: row[0] for row in cursor.fetchall()}
+    logger.info(f"Loaded {len(category_mapping)} category mappings")
+
+    # Get Region mappings
+    cursor.execute("SELECT region_id, region_name FROM Region")
+    region_mapping = {row[1]: row[0] for row in cursor.fetchall()}
+    logger.info(f"Loaded {len(region_mapping)} region mappings")
+
+    # Step 2: Calculate shipping delay for each order
+    # Convert dates to datetime
+    df['Order Date'] = pd.to_datetime(df['Order Date'])
+    df['Ship Date'] = pd.to_datetime(df['Ship Date'])
+
+    # Calculate shipping delay in days
+    df['shipping_delay'] = (df['Ship Date'] - df['Order Date']).dt.days
+
+    # Step 3: Group data by shipping method, category, and region
+    grouped_data = df.groupby(['Ship Mode', 'Category', 'Region']).agg({
+        'shipping_delay': 'mean',  # Average delay for this combination
+        'Order ID': 'count'       # Number of orders (method frequency)
+    }).reset_index()
+
+    # Rename the count column to method_freq
+    grouped_data.rename(columns={'Order ID': 'method_freq'}, inplace=True)
+
+    # Step 4: Insert data into ShippingBehavior table
+    inserted_count = 0
+    skipped_count = 0
+
+    for _, row in grouped_data.iterrows():
+        try:
+            ship_mode = row['Ship Mode']
+            category_name = row['Category']
+            region_name = row['Region']
+
+            # Get dimension keys
+            shipping_id = shipping_mapping.get(ship_mode)
+            category_id = category_mapping.get(category_name)
+            region_id = region_mapping.get(region_name)
+
+            if not all([shipping_id, category_id, region_id]):
+                skipped_count += 1
+                if skipped_count <= 5:
+                    logger.warning(f"Skipping ShippingBehavior record due to missing keys - Ship Mode: {ship_mode}, Category: {category_name}, Region: {region_name}")
+                continue
+
+            # Round the shipping delay to whole days (as the schema uses INT)
+            shipping_delay = int(round(row['shipping_delay']))
+            method_freq = int(row['method_freq'])
+
+            # Insert into ShippingBehavior table
+            query = """
+            INSERT INTO ShippingBehavior (shipping_id, category_id, region_id, shipping_delay, method_freq)
+            VALUES (%s, %s, %s, %s, %s)
+            """
+
+            cursor.execute(query, (
+                shipping_id,
+                category_id,
+                region_id,
+                shipping_delay,
+                method_freq
+            ))
+
+            inserted_count += 1
+
+            # Commit in batches
+            if inserted_count % 10 == 0:
+                connection.commit()
+                logger.info(f"Processed {inserted_count} shipping behavior records...")
+
+        except Exception as e:
+            logger.error(f"Error processing ShippingBehavior record: {e}")
+            logger.error(f"Record data: Ship Mode: {ship_mode}, Category: {category_name}, Region: {region_name}")
+
+    # Final commit
+    connection.commit()
+    logger.info(f"Loaded {inserted_count} records into ShippingBehavior fact table")
+    logger.info(f"Skipped {skipped_count} records due to missing dimension keys")
+
+    return inserted_count
+
+
+# Function to load ShippingBehaviorS fact table
+def load_shipping_behavior_s_fact_table(connection, df):
+    cursor = connection.cursor()
+
+    logger.info("Starting ETL process for ShippingBehaviorS fact table...")
+
+    # Step 1: Retrieve dimension keys from the database
+    # Get Shipping mappings
+    cursor.execute("SELECT shipping_id, ship_mode FROM Shipping")
+    shipping_mapping = {row[1]: row[0] for row in cursor.fetchall()}
+    logger.info(f"Loaded {len(shipping_mapping)} shipping mappings")
+
+    # Get Category mappings
+    cursor.execute("SELECT category_id, category_name FROM Category")
+    category_mapping = {row[1]: row[0] for row in cursor.fetchall()}
+    logger.info(f"Loaded {len(category_mapping)} category mappings")
+
+    # Get State mappings (instead of Region)
+    cursor.execute("SELECT state_id, state_name FROM State")
+    state_mapping = {row[1]: row[0] for row in cursor.fetchall()}
+    logger.info(f"Loaded {len(state_mapping)} state mappings")
+
+    # Step 2: Calculate shipping delay for each order (if not already calculated)
+    if "shipping_delay" not in df.columns:
+        # Convert dates to datetime
+        df["Order Date"] = pd.to_datetime(df["Order Date"])
+        df["Ship Date"] = pd.to_datetime(df["Ship Date"])
+
+        # Calculate shipping delay in days
+        df["shipping_delay"] = (df["Ship Date"] - df["Order Date"]).dt.days
+
+    # Step 3: Group data by shipping method, category, and STATE (not region)
+    grouped_data = (
+        df.groupby(["Ship Mode", "Category", "State"])
+        .agg(
+            {
+                "shipping_delay": "mean",  # Average delay for this combination
+                "Order ID": "count",  # Number of orders (method frequency)
+            }
+        )
+        .reset_index()
+    )
+
+    # Rename the count column to method_freq
+    grouped_data.rename(columns={"Order ID": "method_freq"}, inplace=True)
+
+    # Step 4: Insert data into ShippingBehaviorS table
+    inserted_count = 0
+    skipped_count = 0
+
+    for _, row in grouped_data.iterrows():
+        try:
+            ship_mode = row["Ship Mode"]
+            category_name = row["Category"]
+            state_name = row["State"]  # Using state instead of region
+
+            # Get dimension keys
+            shipping_id = shipping_mapping.get(ship_mode)
+            category_id = category_mapping.get(category_name)
+            state_id = state_mapping.get(
+                state_name
+            )  # Get state_id instead of region_id
+
+            if not all([shipping_id, category_id, state_id]):
+                skipped_count += 1
+                if skipped_count <= 5:
+                    logger.warning(
+                        f"Skipping ShippingBehaviorS record due to missing keys - Ship Mode: {ship_mode}, Category: {category_name}, State: {state_name}"
+                    )
+                continue
+
+            # Round the shipping delay to whole days (as the schema uses INT)
+            shipping_delay = int(round(row["shipping_delay"]))
+            method_freq = int(row["method_freq"])
+
+            # Insert into ShippingBehaviorS table
+            query = """
+            INSERT INTO ShippingBehaviorS (shipping_id, category_id, state_id, shipping_delay, method_freq)
+            VALUES (%s, %s, %s, %s, %s)
+            """
+
+            cursor.execute(
+                query, (shipping_id, category_id, state_id, shipping_delay, method_freq)
+            )
+
+            inserted_count += 1
+
+            # Commit in batches
+            if inserted_count % 100 == 0:
+                connection.commit()
+                logger.info(
+                    f"Processed {inserted_count} state-level shipping behavior records..."
+                )
+
+        except Exception as e:
+            logger.error(f"Error processing ShippingBehaviorS record: {e}")
+            logger.error(
+                f"Record data: Ship Mode: {ship_mode}, Category: {category_name}, State: {state_name}"
+            )
+
+    # Final commit
+    connection.commit()
+    logger.info(f"Loaded {inserted_count} records into ShippingBehaviorS fact table")
+    logger.info(f"Skipped {skipped_count} records due to missing dimension keys")
+
+    return inserted_count
+
 
 def load_fact_tables(connection, df):
     # Execute the loading functions
@@ -958,6 +1162,22 @@ def load_fact_tables(connection, df):
             product_perf_count = load_product_performance_fact_table(connection, df)
             logger.info(
                 f"ProductPerformance fact table loading complete - {product_perf_count} records inserted"
+            )
+
+            # Load ShippingBehavior fact table
+            logger.info("Loading ShippingBehavior fact table...")
+            shipping_behavior_count = load_shipping_behavior_fact_table(connection, df)
+            logger.info(
+                f"ShippingBehavior fact table loading complete - {shipping_behavior_count} records inserted"
+            )
+
+            # Load ShippingBehaviorS fact table
+            logger.info("Loading ShippingBehaviorS fact table...")
+            shipping_behavior_s_count = load_shipping_behavior_s_fact_table(
+                connection, df
+            )
+            logger.info(
+                f"ShippingBehaviorS fact table loading complete - {shipping_behavior_s_count} records inserted"
             )
 
     except Error as e:
