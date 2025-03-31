@@ -356,8 +356,6 @@ def load_geography_dimensions(connection, df, level_mappings):
 def load_shipping_dimension(connection, df):
     # Extract unique shipping modes
     shipping_df = df["Ship Mode"].drop_duplicates().reset_index(drop=True)
-    
-    logger.info(f"Unique shipping modes: {shipping_df.tolist()}")
 
     cursor = connection.cursor()
     for shipping_mode in shipping_df:
@@ -813,6 +811,146 @@ def load_order_m_fact_table(connection, df):
     return inserted_count
 
 
+# Function to load ProductPerformance fact table
+def load_product_performance_fact_table(connection, df):
+    cursor = connection.cursor()
+
+    logger.info("Starting ETL process for ProductPerformance fact table...")
+
+    # Step 1: Retrieve dimension keys from the database
+    # Get Category mappings
+    cursor.execute("SELECT category_id, category_name FROM Category")
+    category_mapping = {row[1]: row[0] for row in cursor.fetchall()}
+    logger.info(f"Loaded {len(category_mapping)} category mappings")
+
+    # Get State mappings
+    cursor.execute("SELECT state_id, state_name FROM State")
+    state_mapping = {row[1]: row[0] for row in cursor.fetchall()}
+    logger.info(f"Loaded {len(state_mapping)} state mappings")
+
+    # Get CalendarMonth mappings
+    cursor.execute(
+        """
+        SELECT calendar_month_id, year_number, calendar_month_number 
+        FROM CalendarMonth
+    """
+    )
+    calendar_month_mapping = {(row[1], row[2]): row[0] for row in cursor.fetchall()}
+    logger.info(f"Loaded {len(calendar_month_mapping)} calendar month mappings")
+
+    # Step 2: Create month and year columns for grouping
+    df["year"] = pd.to_datetime(df["Order Date"]).dt.year
+    df["month"] = pd.to_datetime(df["Order Date"]).dt.month
+
+    # Step 3: Group data by category, state, year, month to calculate aggregates
+    grouped_data = (
+        df.groupby(["Category", "State", "year", "month"])
+        .agg({"Sales": "sum", "Profit": "sum", "Quantity": "sum"})
+        .reset_index()
+    )
+
+    # Step 4: Calculate cumulative profit per category and state over time
+    # Initialize a dictionary to store cumulative profit
+    cumulative_profits = {}
+
+    # Sort the data by year, month to ensure correct cumulative calculation
+    grouped_data = grouped_data.sort_values(["Category", "State", "year", "month"])
+
+    # Calculate cumulative profit for each category and state
+    for _, row in grouped_data.iterrows():
+        category = row["Category"]
+        state = row["State"]
+        profit = float(row["Profit"])
+
+        # Create a key for this category-state combination
+        key = (category, state)
+
+        # Initialize if not exists
+        if key not in cumulative_profits:
+            cumulative_profits[key] = 0
+
+        # Add current profit to cumulative
+        cumulative_profits[key] += profit
+
+        # Store the cumulative value back in the row
+        row["cumulative_profit"] = cumulative_profits[key]
+
+    # Step 5: Insert data into ProductPerformance table
+    inserted_count = 0
+    skipped_count = 0
+    
+    # log the cumulative profits for debugging
+    logger.info(f"Cumulative profits: {grouped_data[:,['cumulative_profit']]}")
+
+    for _, row in grouped_data.iterrows():
+        try:
+            category_name = row["Category"]
+            state_name = row["State"]
+            year = row["year"]
+            month = row["month"]
+
+            # Get dimension keys
+            category_id = category_mapping.get(category_name)
+            state_id = state_mapping.get(state_name)
+            calendar_month_id = calendar_month_mapping.get((year, month))
+
+            if not all([category_id, state_id, calendar_month_id]):
+                skipped_count += 1
+                if skipped_count <= 5:
+                    logger.warning(
+                        f"Skipping ProductPerformance record due to missing keys - Category: {category_name}, State: {state_name}, Year: {year}, Month: {month}"
+                    )
+                continue
+
+            # Get the measures
+            total_sales = float(row["Sales"])
+            total_profit = float(row["Profit"])
+            cumulative_profit = float(row["cumulative_profit"])
+            total_quantity = int(row["Quantity"])
+
+            # Insert into ProductPerformance table
+            query = """
+            INSERT INTO ProductPerformance (category_id, state_id, calendar_month_id, 
+                                          total_sales, total_profit, cumulative_profit, total_quantity)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """
+
+            cursor.execute(
+                query,
+                (
+                    category_id,
+                    state_id,
+                    calendar_month_id,
+                    total_sales,
+                    total_profit,
+                    cumulative_profit,
+                    total_quantity,
+                ),
+            )
+
+            inserted_count += 1
+
+            # Commit in batches
+            if inserted_count % 50 == 0:
+                connection.commit()
+                logger.info(
+                    f"Processed {inserted_count} product performance records..."
+                )
+
+        except Exception as e:
+            logger.error(f"Error processing ProductPerformance record: {e}")
+            logger.error(
+                f"Record data: Category: {category_name}, State: {state_name}, Year: {year}, Month: {month}"
+            )
+
+    # Final commit
+    connection.commit()
+    logger.info(f"Loaded {inserted_count} records into ProductPerformance fact table")
+    logger.info(f"Skipped {skipped_count} records due to missing dimension keys")
+
+    return inserted_count
+
+
 def load_fact_tables(connection, df):
     # Execute the loading functions
     try:
@@ -837,6 +975,13 @@ def load_fact_tables(connection, df):
             order_m_count = load_order_m_fact_table(connection, df)
             logger.info(
                 f"OrderM fact table loading complete - {order_m_count} records inserted"
+            )
+
+            # Load ProductPerformance fact table
+            logger.info("Loading ProductPerformance fact table...")
+            product_perf_count = load_product_performance_fact_table(connection, df)
+            logger.info(
+                f"ProductPerformance fact table loading complete - {product_perf_count} records inserted"
             )
 
     except Error as e:
