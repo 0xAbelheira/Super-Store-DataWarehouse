@@ -4,6 +4,7 @@ comm==0.2.2
 debugpy==1.8.13
 decorator==5.2.1
 executing==2.2.0
+greenlet==3.1.1
 ipykernel==6.29.5
 ipython==9.0.2
 ipython_pygments_lexers==1.1.1
@@ -28,13 +29,17 @@ psutil==7.0.0
 ptyprocess==0.7.0
 pure_eval==0.2.3
 Pygments==2.19.1
+PyMySQL==1.1.1
 python-dateutil==2.9.0.post0
 python-dotenv==1.1.0
 pytz==2025.2
 pyzmq==26.3.0
 six==1.17.0
+SQLAlchemy==2.0.40
 stack-data==0.6.3
 tornado==6.4.2
 traitlets==5.14.3
+typing_extensions==4.13.0
 tzdata==2025.2
 wcwidth==0.2.13
+XlsxWriter==3.2.2
