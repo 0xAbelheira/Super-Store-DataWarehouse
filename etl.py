@@ -849,38 +849,14 @@ def load_product_performance_fact_table(connection, df):
         .reset_index()
     )
 
-    # Step 4: Calculate cumulative profit per category and state over time
-    # Initialize a dictionary to store cumulative profit
-    cumulative_profits = {}
-
-    # Sort the data by year, month to ensure correct cumulative calculation
+    # Step 4: Calculate cumulative profit per category and state over time using vectorized operation
     grouped_data = grouped_data.sort_values(["Category", "State", "year", "month"])
-
-    # Calculate cumulative profit for each category and state
-    for _, row in grouped_data.iterrows():
-        category = row["Category"]
-        state = row["State"]
-        profit = float(row["Profit"])
-
-        # Create a key for this category-state combination
-        key = (category, state)
-
-        # Initialize if not exists
-        if key not in cumulative_profits:
-            cumulative_profits[key] = 0
-
-        # Add current profit to cumulative
-        cumulative_profits[key] += profit
-
-        # Store the cumulative value back in the row
-        row["cumulative_profit"] = cumulative_profits[key]
+    logger.info(f"Calculating cumulative profits using vectorized operation...")
+    grouped_data["cumulative_profit"] = grouped_data.groupby(["Category", "State"])["Profit"].cumsum()
 
     # Step 5: Insert data into ProductPerformance table
     inserted_count = 0
     skipped_count = 0
-    
-    # log the cumulative profits for debugging
-    logger.info(f"Cumulative profits: {grouped_data[:,['cumulative_profit']]}")
 
     for _, row in grouped_data.iterrows():
         try:
