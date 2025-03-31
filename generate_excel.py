@@ -1,9 +1,13 @@
+#!/usr/bin/env python3
+# filepath: /Users/brunofernandes/Desktop/FEUP/MECD/ucs/2S/AD/project/Super-Store-DataWarehouse/generate_excel.py
+
 import os
 import pandas as pd
 import mysql.connector
 from mysql.connector import Error
 from dotenv import load_dotenv
 import logging
+from sqlalchemy import create_engine
 
 # Configure logging
 logging.basicConfig(
@@ -17,50 +21,51 @@ logger = logging.getLogger("excel_export")
 load_dotenv()
 
 # Database connection parameters
-db_config = {
-    "host": os.getenv("DB_HOST"),
-    "database": os.getenv("DB_NAME"),
-    "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD"),
-}
+db_host = os.getenv("DB_HOST")
+db_name = os.getenv("DB_NAME")
+db_user = os.getenv("DB_USER")
+db_password = os.getenv("DB_PASSWORD")
 
 
-def get_tables(connection):
+def get_tables(engine):
     """Get list of all tables in the database"""
-    cursor = connection.cursor()
-    cursor.execute("SHOW TABLES")
-    tables = [table[0] for table in cursor.fetchall()]
-    cursor.close()
+    query = "SHOW TABLES"
+    tables_df = pd.read_sql(query, engine)
+    tables = tables_df.iloc[:, 0].tolist()
     return tables
 
 
-def get_table_data(connection, table_name):
+def get_table_data(engine, table_name):
     """Get all data from a specified table"""
     query = f"SELECT * FROM {table_name}"
     try:
-        df = pd.read_sql(query, connection)
+        df = pd.read_sql(query, engine)
         logger.info(f"Retrieved {len(df)} rows from {table_name}")
         return df
-    except Error as e:
+    except Exception as e:
         logger.error(f"Error reading data from {table_name}: {e}")
         return pd.DataFrame()  # Return empty dataframe on error
 
 
 def main():
     try:
-        # Connect to the MySQL database
-        logger.info("Connecting to database...")
-        connection = mysql.connector.connect(**db_config)
+        # Create SQLAlchemy engine
+        logger.info("Creating database connection...")
+        connection_string = (
+            f"mysql+pymysql://{db_user}:{db_password}@{db_host}/{db_name}"
+        )
+        engine = create_engine(connection_string)
 
-        if connection.is_connected():
-            logger.info(f"Connected to MySQL database: {db_config['database']}")
+        # Test connection
+        with engine.connect() as connection:
+            logger.info(f"Connected to MySQL database: {db_name}")
 
             # Get all tables
-            tables = get_tables(connection)
+            tables = get_tables(engine)
             logger.info(f"Found {len(tables)} tables in database")
 
             # Create Excel writer object with XlsxWriter engine
-            output_file = f"{db_config['database']}_export.xlsx"
+            output_file = f"{db_name}_export.xlsx"
             logger.info(f"Creating Excel file: {output_file}")
 
             # Use ExcelWriter with xlsxwriter engine for better formatting options
@@ -68,7 +73,7 @@ def main():
                 # Create separate worksheets for dimension and fact tables for better organization
                 for table_name in tables:
                     # Get data from table
-                    df = get_table_data(connection, table_name)
+                    df = get_table_data(engine, table_name)
 
                     if not df.empty:
                         # Write dataframe to Excel sheet
@@ -105,13 +110,8 @@ def main():
 
             logger.info(f"Excel file created successfully: {output_file}")
 
-    except Error as e:
-        logger.error(f"Database connection error: {e}")
-
-    finally:
-        if "connection" in locals() and connection.is_connected():
-            connection.close()
-            logger.info("Database connection closed")
+    except Exception as e:
+        logger.error(f"Error: {e}")
 
 
 if __name__ == "__main__":
